@@ -2,39 +2,30 @@ import pandas as pd
 import re
 import nltk
 import jieba
+from collections import Counter
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer, PorterStemmer
+import torch
 
+# Download required NLTK resources
 nltk.download('punkt')
 nltk.download('stopwords')
 nltk.download('wordnet')
 
+# Initialize tools
 lemmatizer = WordNetLemmatizer()
 stemmer = PorterStemmer()
-
 english_stopwords = set(stopwords.words('english'))
+chinese_stopwords = set([])  # Fill in your Chinese stopwords here
 
-chinese_stopwords = set([
-    '的', '了', '在', '是', '我', '有', '和', '不', '就', '人', '都', '一', '一个', '上', '也', '很',
-    '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这', '那', '但', '给',
-    '来', '我们', '为', '着', '那', '被', '与', '或', '及', '如果', '而', '并', '被', '被', '之',
-    '于', '和', '与', '以', '被', '此', '所', '其', '及', '各', '还', '更', '又', '将', '把',
-    '哪', '些', '呢', '吧', '吗', '啊', '呀', '呵', '唉', '呃', '嗯',
-    '和', '而且', '但是', '所以', '因为', '虽然', '如果', '或者', '以及',
-    '那么', '时候', '这样', '这样子', '这么', '那么', '这么样', '这么点',
-    '还要', '还有', '尤其', '到底', '根本', '简直', '几乎', '差不多', '大概',
-    '总是', '经常', '往往', '已经', '曾经', '正好', '突然', '忽然', '到底',
-    '非常', '特别', '尤其', '最', '都', '每', '各', '任何', '每个', '自己',
-])
-
-
+# Language detection based on presence of Chinese characters
 def detect_language(text):
-    """Detect if text is Chinese or English."""
     if re.search(r'[\u4e00-\u9fff]', text):
         return 'chinese'
     return 'english'
 
+# Text preprocessing for English & Chinese
 def preprocess_text(text):
     text = str(text).strip()
     lang = detect_language(text)
@@ -46,21 +37,63 @@ def preprocess_text(text):
         tokens = [word for word in tokens if word not in english_stopwords]
         tokens = [stemmer.stem(lemmatizer.lemmatize(word)) for word in tokens]
     else:
-        # Tokenize Chinese text
         tokens = jieba.lcut(text)
         tokens = [word for word in tokens if word not in chinese_stopwords and re.match(r'[\u4e00-\u9fff]', word)]
 
     return ' '.join(tokens)
 
-def preprocess_csv(csv_path):
+# Build vocabulary from tokenized sentences
+def build_vocab(sentences, min_freq=1):
+    counter = Counter()
+    for sentence in sentences:
+        tokens = sentence.split()
+        counter.update(tokens)
+
+    vocab = {"[PAD]": 0, "[UNK]": 1}
+    idx = 2
+    for word, freq in counter.items():
+        if freq >= min_freq:
+            vocab[word] = idx
+            idx += 1
+    return vocab
+
+# Convert sentence to token indices
+def tokenize_and_index(sentence, vocab):
+    return [vocab.get(token, vocab["[UNK]"]) for token in sentence.split()]
+
+# Pad or truncate a sequence to max_len
+def pad_sequence(seq, max_len, pad_value=0):
+    return seq[:max_len] if len(seq) >= max_len else seq + [pad_value] * (max_len - len(seq))
+
+# Convert all sentences to padded tensor
+def process_and_index_sentences(preprocessed_sentences, vocab, max_len):
+    sequences = []
+    for sent in preprocessed_sentences:
+        indices = tokenize_and_index(sent, vocab)
+        padded = pad_sequence(indices, max_len)
+        sequences.append(padded)
+    return torch.tensor(sequences, dtype=torch.long)
+
+# Create attention mask (1 for real token, 0 for PAD)
+def create_attention_mask(batch_input, pad_idx=0):
+    return (batch_input != pad_idx).long()
+
+# Master function: load CSV → preprocess → vocab → tensor
+def preprocess_transcript_csv(csv_path, max_len=50, min_freq=1):
     df = pd.read_csv(csv_path)
     if 'Sentence' not in df.columns:
-        raise ValueError("CSV file must contain a 'Sentence' column.")
+        raise ValueError("CSV must have a 'Sentence' column.")
     
+    # Preprocess each sentence
     df['Preprocessed_Sentence'] = df['Sentence'].astype(str).apply(preprocess_text)
-    return df[['Sentence', 'Preprocessed_Sentence']]
 
+    # Build vocab
+    vocab = build_vocab(df['Preprocessed_Sentence'].tolist(), min_freq=min_freq)
 
-path = 'path to csv file'
-result_df = preprocess_csv(path)
-print(result_df.head())
+    # Index and pad
+    tensor_input = process_and_index_sentences(df['Preprocessed_Sentence'], vocab, max_len)
+
+    # Create attention mask
+    attention_mask = create_attention_mask(tensor_input)
+
+    return df[['Sentence', 'Preprocessed_Sentence']], vocab, tensor_input, attention_mask
